@@ -25,6 +25,72 @@ function splitSentences(text) {
     return parts.map(p => p.trim()).filter(p => p.length > 0);
 }
 
+function isMarkerLine(line) {
+    return line.startsWith('【') || CHAPTER_NAMES.includes(line);
+}
+
+function extractOriginalLines(lines, startIdx, endIdx, startsAfterTranslation) {
+    const origLines = [];
+    let foundOrig = false;
+    let seenTextBeforeOrig = false;
+    let blankStreak = 0;
+
+    for (let i = startIdx + 1; i < endIdx; i++) {
+        const line = lines[i].trim();
+        if (!line) {
+            blankStreak++;
+            if (startsAfterTranslation && seenTextBeforeOrig && blankStreak >= 2) {
+                foundOrig = true;
+            }
+            continue;
+        }
+        if (isMarkerLine(line)) continue;
+
+        if (startsAfterTranslation && !foundOrig) {
+            if (/\[\d+\]/.test(line)) {
+                foundOrig = true;
+            } else {
+                seenTextBeforeOrig = true;
+                blankStreak = 0;
+                continue;
+            }
+        } else if (!startsAfterTranslation && !foundOrig) {
+            if (!/\[\d+\]/.test(line)) continue; // skip 题解/译文 content
+            foundOrig = true;
+        }
+
+        origLines.push(line);
+        blankStreak = 0;
+    }
+
+    return origLines;
+}
+
+function extractTranslationLines(lines, startIdx, endIdx) {
+    const transLines = [];
+    let blankStreak = 0;
+
+    for (let i = startIdx + 1; i < endIdx; i++) {
+        const line = lines[i].trim();
+        if (!line) {
+            blankStreak++;
+            continue;
+        }
+        if (isMarkerLine(line)) continue;
+
+        // Annotation markers are the strongest signal that the next original
+        // block has started. At chapter/file tails, multi-blank gaps also
+        // keep trailing table-of-contents text out of the translation.
+        if (transLines.length > 0 && /\[\d+\]/.test(line)) break;
+        if (transLines.length > 0 && blankStreak >= 2 && line === 'Table of Contents') break;
+
+        transLines.push(line);
+        blankStreak = 0;
+    }
+
+    return transLines;
+}
+
 function parseFile(filepath) {
     const content = fs.readFileSync(filepath, 'utf-8');
     const lines = content.split(/\r?\n/);
@@ -64,6 +130,7 @@ function parseFile(filepath) {
         // Pair each 【译文】 with the preceding 【注释】
         // Each pair: { origParas: string[], transParas: string[] }
         const blockPairs = [];
+        let previousTransLines = [];
 
         for (const yw of yiwenMarkers) {
             // Find the 【注释】 that immediately precedes this 【译文】
@@ -87,16 +154,13 @@ function parseFile(filepath) {
             }
 
             // --- Extract original paragraphs ---
-            // Within [origRangeStart+1, commentMarker.idx-1], find lines belonging to original text.
-            // Skip 题解/translation content by looking for the first line with an annotation marker [N].
-            const origLines = [];
-            let foundOrig = false;
-            for (let i = origRangeStart + 1; i < commentMarker.idx; i++) {
-                const line = lines[i].trim();
-                if (!line || line.startsWith('【')) continue;
-                if (!foundOrig && !/\[\d+\]/.test(line)) continue; // skip 题解/译文 content
-                foundOrig = true;
-                origLines.push(line);
+            // After a 【译文】 block, the next original block is separated by
+            // multiple blank lines; some original paragraphs have no [N] note.
+            const startsAfterTranslation = yiwenMarkers.some(prevYw => prevYw.idx === origRangeStart);
+            let origLines = extractOriginalLines(lines, origRangeStart, commentMarker.idx, startsAfterTranslation);
+            if (startsAfterTranslation && previousTransLines.length > 0) {
+                const previousTransSet = new Set(previousTransLines);
+                origLines = origLines.filter(line => !previousTransSet.has(line));
             }
 
             // Split original lines into paragraphs (file-level blank-line separation)
@@ -108,17 +172,12 @@ function parseFile(filepath) {
             }
 
             // --- Extract translation paragraphs ---
-            // Within [yw.idx+1, transRangeEnd-1]
-            // IMPORTANT: this range contains both translation AND the next block's original text.
-            // We must stop at the point where annotation markers [N] start appearing again.
-            const transLines = [];
-            let stoppedByOrig = false;
-            for (let i = yw.idx + 1; i < transRangeEnd; i++) {
-                const line = lines[i].trim();
-                if (!line || line.startsWith('【') || CHAPTER_NAMES.includes(line) || line === '【题解】') continue;
-                // If we encounter annotation markers, this is the next block's original text
-                if (/\[\d+\]/.test(line)) break;
-                transLines.push(line);
+            // Stop before the next original block. Some original paragraphs do
+            // not have [N] markers, so also honor the multi-blank block break.
+            let transLines = extractTranslationLines(lines, yw.idx, transRangeEnd);
+            if (origLines.length > 0 && transLines.length > 0) {
+                const origLineSet = new Set(origLines.filter(line => cleanText(line).length > 40));
+                transLines = transLines.filter(line => !origLineSet.has(line));
             }
 
             const transParas = [];
@@ -132,6 +191,7 @@ function parseFile(filepath) {
             if (origParas.length > 0 && transParas.length > 0) {
                 blockPairs.push({ origParas: cleanOrigParas, transParas });
             }
+            previousTransLines = transLines;
         }
 
         if (blockPairs.length > 0) {
@@ -167,12 +227,16 @@ function buildAlignedData(chapters) {
                     }
                 }
             } else {
-                // Proportional fallback for unequal counts
+                // Fallback for unequal counts: keep the translation narrow.
+                // Joining multiple translation paragraphs often leaks later text.
                 for (let oi = 0; oi < nO; oi++) {
-                    const startRatio = oi / nO;
-                    const tStart = Math.floor(startRatio * nT);
-                    const tEnd = Math.min(Math.floor(((oi + 1) / nO) * nT) + 1, nT);
-                    const mappedTrans = transParas.slice(tStart, Math.max(tEnd, tStart + 1)).join('');
+                    const normalizedOrig = normalizeForMatch(origParas[oi]);
+                    const exactIndex = transParas.findIndex(t => {
+                        const normalizedTrans = normalizeForMatch(t);
+                        return normalizedTrans === normalizedOrig || normalizedTrans.startsWith(normalizedOrig);
+                    });
+                    const tIndex = exactIndex >= 0 ? exactIndex : Math.min(oi, nT - 1);
+                    const mappedTrans = transParas[tIndex] || '';
                     const sents = splitSentences(origParas[oi]);
                     if (origParas[oi].trim() && mappedTrans.trim()) {
                         ch.pairedParas.push({
@@ -189,6 +253,10 @@ function buildAlignedData(chapters) {
 
 function escapeHtml(str) {
     return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function normalizeForMatch(str) {
+    return str.replace(/[，。！？；：“”‘’、,.;:!?""'']/g, '').replace(/\s+/g, '');
 }
 
 function generateHtml(chapters, outputPath) {
@@ -230,15 +298,15 @@ function generateHtml(chapters, outputPath) {
   header {
     background: linear-gradient(135deg, #3d2b1f 0%, #5c3d2e 50%, #3d2b1f 100%);
     color: #f0e0c0; text-align: center; padding: 48px 24px 40px;
-    position: sticky; top: 0; z-index: 100;
+    position: relative;
     box-shadow: 0 2px 20px rgba(0,0,0,0.3);
   }
-  header h1 { font-size: 2.2em; font-weight: 700; letter-spacing: 0.15em; margin-bottom: 8px; }
+  header h1 { font-size: 1.8em; font-weight: 700; letter-spacing: 0.12em; margin-bottom: 6px; }
   header p { font-size: 0.95em; opacity: 0.7; letter-spacing: 0.1em; }
 
   nav {
     background: #fff; border-bottom: 1px solid #e0d5c0; padding: 4px 0;
-    position: sticky; top: 134px; z-index: 99; overflow-x: auto; white-space: nowrap;
+    position: sticky; top: 0; z-index: 99; overflow-x: auto; white-space: nowrap;
     box-shadow: 0 1px 8px rgba(0,0,0,0.05); display: flex; justify-content: center;
   }
   nav a {
@@ -329,9 +397,9 @@ function generateHtml(chapters, outputPath) {
   }
 
   @media (max-width: 640px) {
-    header h1 { font-size: 1.5em; }
-    header { padding: 28px 16px 24px; }
-    nav { top: 96px; }
+    header h1 { font-size: 1.25em; }
+    header { padding: 20px 16px 18px; }
+    nav { top: 0; }
     nav a { padding: 8px 10px; font-size: 0.78em; }
     main { padding: 16px 10px 60px; }
     .orig-sent { font-size: 1em; }
@@ -402,7 +470,6 @@ function generateHtml(chapters, outputPath) {
               span.classList.add('active');
 
               // Reveal translation
-              var wasRevealed = group.classList.contains('revealed');
               // Close all other groups in this chapter
               var allGroups = section.querySelectorAll('.para-group');
               for (var g = 0; g < allGroups.length; g++) {
@@ -412,14 +479,8 @@ function generateHtml(chapters, outputPath) {
                   sents[s].classList.remove('active');
                 }
               }
-              if (!wasRevealed) {
-                group.classList.add('revealed');
-                span.classList.add('active');
-                // Scroll to the group
-                setTimeout(function() {
-                  group.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                }, 80);
-              }
+              group.classList.add('revealed');
+              span.classList.add('active');
             });
 
             origBlock.appendChild(span);
