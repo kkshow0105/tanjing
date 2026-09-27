@@ -1,0 +1,7 @@
+# Only these five files are needed by the static reader.
+/*
+!index.html
+!translation-map.js
+!service-worker.js
+!manifest.webmanifest
+!icon.svg

@@ -1,7 +1,8 @@
-const CACHE_NAME = 'liuzu-tanjing-v2';
+const CACHE_NAME = 'liuzu-tanjing-v9';
 const APP_SHELL = [
   './',
   './index.html',
+  './translation-map.js?v=8',
   './manifest.webmanifest',
   './icon.svg'
 ];

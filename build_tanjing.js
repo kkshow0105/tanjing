@@ -22,7 +22,18 @@ function cleanText(text) {
 function splitSentences(text) {
     if (!text.trim()) return [];
     const parts = text.split(/(?<=[。！？；])/);
-    return parts.map(p => p.trim()).filter(p => p.length > 0);
+    const result = [];
+    for (let part of parts) {
+        part = part.trim();
+        // A closing quote/bracket belongs to the sentence before the punctuation.
+        const closing = part.match(/^[”’》〉」』】]+/);
+        if (closing && result.length) {
+            result[result.length - 1] += closing[0];
+            part = part.slice(closing[0].length);
+        }
+        if (part) result.push(part);
+    }
+    return result;
 }
 
 function isMarkerLine(line) {

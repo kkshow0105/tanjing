@@ -1,0 +1,19 @@
+# Local backups and one-time mapping audits stay on this computer.
+/final-source-repair-backup-*/
+/*diagnosis*.json
+/*review*.json
+/*report*.json
+/*backup*.json
+/*validation*.json
+/*analysis*.json
+/high-audit-sample*.json
+/old-high-*.json
+/translation-map-candidates.json
+/translation-candidate-*.json
+/translation-map-before-*.js
+/generate_*.js
+/prepare_*.js
+/merge_*.js
+/reevaluate_*.js
+/paragraph_alignment.js
+/translation-review.html
